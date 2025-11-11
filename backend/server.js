@@ -61,6 +61,26 @@ const OMDB_API_KEY =
   '';
 const OMDB_CACHE_COLLECTION = 'omdbRatings';
 const OMDB_CACHE_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
+const YOUTUBE_SEARCH_BASE_URL = 'https://www.googleapis.com/youtube/v3/search';
+const YOUTUBE_API_KEY =
+  process.env.YOUTUBE_API_KEY ||
+  process.env.YOUTUBE_KEY ||
+  process.env.GOOGLE_API_KEY ||
+  '';
+const YOUTUBE_SEARCH_CACHE_COLLECTION = 'youtubeSearchCache';
+const YOUTUBE_SEARCH_CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
+
+const DEFAULT_REMOTE_API_BASE = 'https://narrow-down.web.app/api';
+const DEFAULT_REMOTE_TMDB_PROXY_URL = `${DEFAULT_REMOTE_API_BASE}/tmdbProxy`;
+const TMDB_BASE_URL = 'https://api.themoviedb.org';
+const TV_DISCOVER_CACHE_COLLECTION = 'tvDiscoverCache';
+const TV_DISCOVER_CACHE_TTL_MS = 1000 * 60 * 10;
+const TV_DISCOVER_DEFAULT_LIMIT = 20;
+const TV_DISCOVER_MAX_LIMIT = 60;
+const TV_DISCOVER_MAX_PAGES = 5;
+const TV_GENRE_CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour
+let cachedTvGenres = null;
+let cachedTvGenresFetchedAt = 0;
 
 async function safeReadCachedResponse(collection, keyParts, ttlMs) {
   try {
@@ -88,8 +108,245 @@ function resolveTmdbApiKey() {
   );
 }
 
-function resolveTmdbProxyEndpoint() {
-  return process.env.TMDB_PROXY_ENDPOINT || '';
+function resolveSelfOrigin(req) {
+  if (!req) return null;
+  const host = req.get('host');
+  if (!host) return null;
+  const protocolHeader = req.headers['x-forwarded-proto'];
+  const forwardedProtocol = Array.isArray(protocolHeader)
+    ? protocolHeader[0]
+    : protocolHeader;
+  const protocol = req.protocol || (forwardedProtocol ? String(forwardedProtocol).split(',')[0].trim() : null) || 'http';
+  return `${protocol}://${host}`;
+}
+
+function resolveTmdbProxyEndpoint(req) {
+  const explicit = process.env.TMDB_PROXY_ENDPOINT;
+  if (explicit) {
+    return explicit;
+  }
+  const origin = resolveSelfOrigin(req);
+  if (origin) {
+    return `${origin.replace(/\/+$/, '')}/tmdbProxy`;
+  }
+  const base =
+    (process.env.API_BASE_URL && process.env.API_BASE_URL.replace(/\/+$/, '')) || '';
+  if (base) {
+    return `${base}/tmdbProxy`;
+  }
+  return '';
+}
+
+function resolveTmdbProxyUpstreamUrl() {
+  const explicit = process.env.TMDB_PROXY_UPSTREAM || process.env.TMDB_REMOTE_PROXY_URL;
+  if (explicit) {
+    return explicit;
+  }
+  const endpoint = process.env.TMDB_PROXY_ENDPOINT;
+  if (endpoint && /^https?:\/\//i.test(endpoint)) {
+    const lowered = endpoint.toLowerCase();
+    if (
+      !lowered.includes('localhost') &&
+      !lowered.includes('127.0.0.1') &&
+      !lowered.includes('::1')
+    ) {
+      return endpoint;
+    }
+  }
+  return DEFAULT_REMOTE_TMDB_PROXY_URL;
+}
+
+const TMDB_ALLOWED_ENDPOINTS = {
+  discover: { path: '/3/discover/movie' },
+  discover_tv: { path: '/3/discover/tv' },
+  genres: { path: '/3/genre/movie/list' },
+  tv_genres: { path: '/3/genre/tv/list' },
+  credits: {
+    path: query => {
+      const rawId = query?.movie_id ?? query?.id ?? query?.movieId;
+      const value = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (!value && value !== 0) return null;
+      const trimmed = String(value).trim();
+      if (!trimmed) return null;
+      return `/3/movie/${encodeURIComponent(trimmed)}/credits`;
+    },
+    omitParams: ['movie_id', 'movieId', 'id']
+  },
+  tv_credits: {
+    path: query => {
+      const rawId = query?.tv_id ?? query?.id;
+      const value = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (!value && value !== 0) return null;
+      const trimmed = String(value).trim();
+      if (!trimmed) return null;
+      return `/3/tv/${encodeURIComponent(trimmed)}/credits`;
+    },
+    omitParams: ['tv_id', 'id']
+  },
+  movie_details: {
+    path: query => {
+      const rawId = query?.movie_id ?? query?.id ?? query?.movieId;
+      const value = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (!value && value !== 0) return null;
+      const trimmed = String(value).trim();
+      if (!trimmed) return null;
+      return `/3/movie/${encodeURIComponent(trimmed)}`;
+    },
+    omitParams: ['movie_id', 'movieId', 'id']
+  },
+  tv_details: {
+    path: query => {
+      const rawId = query?.tv_id ?? query?.id;
+      const value = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (!value && value !== 0) return null;
+      const trimmed = String(value).trim();
+      if (!trimmed) return null;
+      return `/3/tv/${encodeURIComponent(trimmed)}`;
+    },
+    omitParams: ['tv_id', 'id']
+  },
+  person_details: {
+    path: query => {
+      const rawId = query?.person_id ?? query?.id;
+      const value = Array.isArray(rawId) ? rawId[0] : rawId;
+      if (!value && value !== 0) return null;
+      const trimmed = String(value).trim();
+      if (!trimmed) return null;
+      return `/3/person/${encodeURIComponent(trimmed)}`;
+    },
+    omitParams: ['person_id', 'id']
+  },
+  search_multi: { path: '/3/search/multi' },
+  search_movie: { path: '/3/search/movie' },
+  search_tv: { path: '/3/search/tv' },
+  trending_all: { path: '/3/trending/all/day' },
+  trending_movies: { path: '/3/trending/movie/day' },
+  trending_tv: { path: '/3/trending/tv/day' },
+  popular_movies: { path: '/3/movie/popular' },
+  popular_tv: { path: '/3/tv/popular' },
+  upcoming_movies: { path: '/3/movie/upcoming' }
+};
+
+function buildTmdbPath(endpointKey, query) {
+  const config = TMDB_ALLOWED_ENDPOINTS[endpointKey];
+  if (!config) {
+    const error = new Error('unsupported_endpoint');
+    error.status = 400;
+    throw error;
+  }
+  if (typeof config.path === 'function') {
+    const resolved = config.path(query);
+    if (!resolved) {
+      const error = new Error('invalid_endpoint_params');
+      error.status = 400;
+      throw error;
+    }
+    return resolved;
+  }
+  return config.path;
+}
+
+function buildTmdbSearchParams(query, omit = []) {
+  const params = new URLSearchParams();
+  const omitSet = new Set(omit);
+  Object.entries(query).forEach(([key, value]) => {
+    if (omitSet.has(key)) return;
+    if (value === undefined || value === null) return;
+    if (Array.isArray(value)) {
+      value.forEach(item => {
+        if (item === undefined || item === null) return;
+        params.append(key, String(item));
+      });
+      return;
+    }
+    params.append(key, String(value));
+  });
+  return params;
+}
+
+async function fetchTmdbDirect(endpointKey, query, apiKey) {
+  const path = buildTmdbPath(endpointKey, query);
+  const config = TMDB_ALLOWED_ENDPOINTS[endpointKey] || {};
+  const params = buildTmdbSearchParams(query, config.omitParams || []);
+  params.set('api_key', apiKey);
+  const url = new URL(path, TMDB_BASE_URL);
+  url.search = params.toString();
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': 'narrow-down-local-proxy'
+    }
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    const error = new Error(`TMDB request failed (${response.status})`);
+    error.status = response.status;
+    error.body = text;
+    throw error;
+  }
+  return text ? JSON.parse(text) : {};
+}
+
+async function forwardTmdbProxy(endpointKey, query) {
+  const upstream = resolveTmdbProxyUpstreamUrl();
+  if (!upstream) {
+    const error = new Error('tmdb_proxy_upstream_unavailable');
+    error.status = 502;
+    throw error;
+  }
+  const url = new URL(upstream);
+  url.searchParams.set('endpoint', endpointKey);
+  Object.entries(query).forEach(([key, value]) => {
+    if (value === undefined || value === null) return;
+    if (Array.isArray(value)) {
+      value.forEach(item => {
+        if (item === undefined || item === null) return;
+        url.searchParams.append(key, String(item));
+      });
+      return;
+    }
+    url.searchParams.append(key, String(value));
+  });
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': 'narrow-down-local-proxy'
+    }
+  });
+  const body = await response.text();
+  return {
+    status: response.status,
+    contentType: response.headers.get('content-type'),
+    body
+  };
+}
+
+async function requestTmdbData(endpointKey, query = {}) {
+  const apiKey = resolveTmdbApiKey();
+  if (apiKey) {
+    try {
+      return await fetchTmdbDirect(endpointKey, query, apiKey);
+    } catch (err) {
+      console.warn(`Direct TMDB request failed for ${endpointKey}`, err?.message || err);
+    }
+  }
+  const forwarded = await forwardTmdbProxy(endpointKey, query);
+  if (forwarded.status >= 400) {
+    const error = new Error('tmdb_proxy_forward_failed');
+    error.status = forwarded.status;
+    error.body = forwarded.body;
+    throw error;
+  }
+  if (!forwarded.body) {
+    return {};
+  }
+  try {
+    return JSON.parse(forwarded.body);
+  } catch (err) {
+    const parseError = new Error('invalid_tmdb_proxy_response');
+    parseError.status = 502;
+    throw parseError;
+  }
 }
 
 // Enable CORS for all routes so the frontend can reach the API
@@ -110,6 +367,49 @@ const mailer = (() => {
 })();
 
 app.use(express.json());
+
+async function handleTmdbProxyRequest(req, res) {
+  const endpointKey = String(req.query.endpoint || 'discover');
+  const query = { ...req.query };
+  delete query.endpoint;
+
+  const apiKey = resolveTmdbApiKey();
+  if (apiKey) {
+    try {
+      const data = await fetchTmdbDirect(endpointKey, query, apiKey);
+      res.type('application/json').send(JSON.stringify(data));
+      return;
+    } catch (err) {
+      console.warn('Direct TMDB request failed, attempting upstream proxy', err);
+    }
+  }
+
+  try {
+    const forwarded = await forwardTmdbProxy(endpointKey, query);
+    res.status(forwarded.status);
+    if (forwarded.contentType) {
+      res.set('content-type', forwarded.contentType);
+    } else {
+      res.type('application/json');
+    }
+    if (forwarded.body) {
+      res.send(forwarded.body);
+    } else {
+      res.send('');
+    }
+  } catch (err) {
+    console.error('TMDB proxy request failed', err);
+    const status =
+      err && typeof err.status === 'number' && err.status >= 400 ? err.status : 502;
+    res.status(status).json({
+      error: 'tmdb_proxy_failed',
+      message: (err && err.message) || 'TMDB proxy request failed'
+    });
+  }
+}
+
+app.get('/tmdbProxy', handleTmdbProxyRequest);
+app.get('/api/tmdbProxy', handleTmdbProxyRequest);
 
 function sendCachedResponse(res, cached) {
   if (!cached || typeof cached.body !== 'string') return false;
@@ -159,6 +459,34 @@ function normalizePositiveInteger(value, { min = 1, max = Number.MAX_SAFE_INTEGE
   return clamped;
 }
 
+function normalizeYouTubeQuery(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeYouTubeThumbnails(thumbnails) {
+  if (!thumbnails || typeof thumbnails !== 'object') return undefined;
+  const normalized = {};
+  Object.entries(thumbnails).forEach(([key, value]) => {
+    if (!value || typeof value !== 'object') return;
+    const url = typeof value.url === 'string' ? value.url : null;
+    if (!url) return;
+    const width = Number.isFinite(value.width) ? Number(value.width) : null;
+    const height = Number.isFinite(value.height) ? Number(value.height) : null;
+    normalized[key] = {
+      url,
+      width: width === null ? undefined : width,
+      height: height === null ? undefined : height
+    };
+  });
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
+function youtubeSearchCacheKey(query) {
+  const normalized = normalizeYouTubeQuery(query).toLowerCase();
+  return ['youtubeSearch', normalized];
+}
+
 function parseOmdbPercent(value) {
   if (value === undefined || value === null) return null;
   const raw = String(value).trim();
@@ -167,6 +495,144 @@ function parseOmdbPercent(value) {
   const num = Number.parseFloat(normalized);
   if (!Number.isFinite(num)) return null;
   return Math.max(0, Math.min(100, Math.round(num)));
+}
+
+function extractYear(value) {
+  if (typeof value !== 'string') return null;
+  const match = value.trim().match(/^(\d{4})/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  return Number.isFinite(year) ? year : null;
+}
+
+function parseIdSet(raw) {
+  const set = new Set();
+  const addParts = value => {
+    if (!value && value !== 0) return;
+    String(value)
+      .split(/[,|\s]+/)
+      .map(part => part.trim())
+      .filter(Boolean)
+      .forEach(part => set.add(part));
+  };
+  if (Array.isArray(raw)) {
+    raw.forEach(addParts);
+  } else if (typeof raw === 'string') {
+    addParts(raw);
+  }
+  return set;
+}
+
+function buildTvDiscoverQuery({ minRating, minVotes, startYear, endYear }) {
+  const query = {
+    sort_by: 'vote_average.desc',
+    include_adult: 'false',
+    include_null_first_air_dates: 'false',
+    language: 'en-US'
+  };
+  if (Number.isFinite(minRating)) {
+    const clamped = Math.max(0, Math.min(10, minRating));
+    query['vote_average.gte'] = clamped;
+  }
+  if (Number.isFinite(minVotes)) {
+    const normalizedVotes = Math.max(0, Math.floor(minVotes));
+    query['vote_count.gte'] = normalizedVotes;
+  }
+  if (Number.isFinite(startYear)) {
+    query['first_air_date.gte'] = `${startYear}-01-01`;
+  }
+  if (Number.isFinite(endYear)) {
+    query['first_air_date.lte'] = `${endYear}-12-31`;
+  }
+  return query;
+}
+
+async function fetchTvGenresWithCache() {
+  if (
+    Array.isArray(cachedTvGenres) &&
+    cachedTvGenres.length &&
+    Date.now() - cachedTvGenresFetchedAt < TV_GENRE_CACHE_TTL_MS
+  ) {
+    return cachedTvGenres;
+  }
+  try {
+    const data = await requestTmdbData('tv_genres', { language: 'en-US' });
+    const genres = Array.isArray(data?.genres) ? data.genres : [];
+    cachedTvGenres = genres;
+    cachedTvGenresFetchedAt = Date.now();
+    return genres;
+  } catch (err) {
+    console.warn('Unable to refresh TV genre list', err?.message || err);
+    return Array.isArray(cachedTvGenres) ? cachedTvGenres : [];
+  }
+}
+
+async function discoverTvShows({
+  limit,
+  minRating,
+  minVotes,
+  startYear,
+  endYear,
+  excludeSet = new Set()
+}) {
+  const queryBase = buildTvDiscoverQuery({ minRating, minVotes, startYear, endYear });
+  const collected = [];
+  const seen = new Set();
+  let page = 1;
+  let totalPages = 1;
+  let totalResults = 0;
+
+  while (collected.length < limit && page <= TV_DISCOVER_MAX_PAGES) {
+    const pageData = await requestTmdbData('discover_tv', { ...queryBase, page });
+    const pageResults = Array.isArray(pageData?.results) ? pageData.results : [];
+    const pageTotalPages = Number(pageData?.total_pages);
+    const pageTotalResults = Number(pageData?.total_results);
+    if (Number.isFinite(pageTotalPages) && pageTotalPages > 0) {
+      totalPages = pageTotalPages;
+    }
+    if (Number.isFinite(pageTotalResults) && pageTotalResults >= 0) {
+      totalResults = pageTotalResults;
+    }
+    pageResults.forEach(show => {
+      if (!show || show.id == null) return;
+      const id = String(show.id);
+      if (excludeSet.has(id) || seen.has(id)) return;
+      const voteAverage = Number(show.vote_average);
+      if (Number.isFinite(minRating) && Number.isFinite(voteAverage) && voteAverage < minRating) {
+        return;
+      }
+      const voteCount = Number(show.vote_count);
+      if (Number.isFinite(minVotes) && Number.isFinite(voteCount) && voteCount < minVotes) {
+        return;
+      }
+      if (Number.isFinite(startYear) || Number.isFinite(endYear)) {
+        const releaseYear =
+          extractYear(show.first_air_date) ||
+          extractYear(show.release_date) ||
+          extractYear(show.last_air_date);
+        if (Number.isFinite(startYear) && Number.isFinite(releaseYear) && releaseYear < startYear) {
+          return;
+        }
+        if (Number.isFinite(endYear) && Number.isFinite(releaseYear) && releaseYear > endYear) {
+          return;
+        }
+      }
+      seen.add(id);
+      collected.push(show);
+    });
+
+    if (pageResults.length === 0 || page >= totalPages) {
+      break;
+    }
+    page += 1;
+  }
+
+  return {
+    results: collected.slice(0, limit),
+    totalPages,
+    totalResults,
+    pagesFetched: page
+  };
 }
 
 function parseOmdbScore(value) {
@@ -606,7 +1072,7 @@ app.get('/api/spotify-client-id', (req, res) => {
 
 app.get('/api/tmdb-config', (req, res) => {
   const apiKey = resolveTmdbApiKey();
-  const proxyEndpoint = resolveTmdbProxyEndpoint();
+  const proxyEndpoint = resolveTmdbProxyEndpoint(req);
 
   if (!apiKey && !proxyEndpoint) {
     return res.status(404).json({ error: 'tmdb_config_unavailable' });
@@ -752,6 +1218,100 @@ app.get('/api/restaurants', async (req, res) => {
     const message =
       err && typeof err.message === 'string' && err.message ? err.message : 'failed';
     res.status(status).json({ error: message });
+  }
+});
+
+app.get('/api/tv', async (req, res) => {
+  const limit =
+    normalizePositiveInteger(req.query.limit, {
+      min: 1,
+      max: TV_DISCOVER_MAX_LIMIT
+    }) || TV_DISCOVER_DEFAULT_LIMIT;
+  let minRating = parseNumberQuery(req.query.minRating);
+  let minVotes = parseNumberQuery(req.query.minVotes);
+  let startYear = parseNumberQuery(req.query.startYear);
+  let endYear = parseNumberQuery(req.query.endYear);
+  if (!Number.isFinite(minRating)) minRating = null;
+  if (!Number.isFinite(minVotes)) minVotes = null;
+  if (!Number.isFinite(startYear)) startYear = null;
+  if (!Number.isFinite(endYear)) endYear = null;
+  if (Number.isFinite(startYear) && Number.isFinite(endYear) && endYear < startYear) {
+    const temp = startYear;
+    startYear = endYear;
+    endYear = temp;
+  }
+  const excludeSet = parseIdSet(req.query.excludeIds);
+
+  const cacheKeyParts = [
+    TV_DISCOVER_CACHE_COLLECTION,
+    `limit:${limit}`,
+    `minRating:${minRating ?? 'any'}`,
+    `minVotes:${minVotes ?? 'any'}`,
+    `startYear:${startYear ?? 'any'}`,
+    `endYear:${endYear ?? 'any'}`,
+    excludeSet.size ? Array.from(excludeSet).slice(0, 200) : 'no-excludes'
+  ];
+
+  const cached = await safeReadCachedResponse(
+    TV_DISCOVER_CACHE_COLLECTION,
+    cacheKeyParts,
+    TV_DISCOVER_CACHE_TTL_MS
+  );
+  if (sendCachedResponse(res, cached)) {
+    return;
+  }
+
+  try {
+    const [discoverResult, genres] = await Promise.all([
+      discoverTvShows({ limit, minRating, minVotes, startYear, endYear, excludeSet }),
+      fetchTvGenresWithCache()
+    ]);
+
+    const genreEntries = Array.isArray(genres) ? genres : [];
+    const genreMap = genreEntries.reduce((acc, entry) => {
+      if (!entry || entry.id == null) return acc;
+      const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+      if (!name) return acc;
+      acc[entry.id] = name;
+      return acc;
+    }, {});
+
+    const response = {
+      results: discoverResult.results,
+      metadata: {
+        limit,
+        minRating: minRating ?? null,
+        minVotes: minVotes ?? null,
+        startYear: startYear ?? null,
+        endYear: endYear ?? null,
+        totalResults: discoverResult.totalResults,
+        totalPages: discoverResult.totalPages,
+        source: 'tmdb_discover',
+        excludeCount: excludeSet.size,
+        fetchedAt: new Date().toISOString()
+      },
+      genres: genreEntries,
+      genreMap,
+      credits: null
+    };
+
+    const payload = {
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response),
+      metadata: response.metadata
+    };
+
+    await safeWriteCachedResponse(TV_DISCOVER_CACHE_COLLECTION, cacheKeyParts, payload);
+    res.type('application/json').send(payload.body);
+  } catch (err) {
+    console.error('Failed to load TV catalog', err);
+    const status =
+      err && typeof err.status === 'number' && err.status >= 400 ? err.status : 500;
+    res.status(status).json({
+      error: 'tv_discover_failed',
+      message: err?.message || 'Unable to load TV shows from TMDB'
+    });
   }
 });
 
@@ -1117,6 +1677,109 @@ app.get('/api/shows', async (req, res) => {
 
   res.json(payload);
 });
+
+app.get('/api/youtube/search', async (req, res) => {
+  const rawQuery =
+    req.query.q ?? req.query.query ?? req.query.term ?? req.query.artist ?? req.query.name ?? '';
+  const query = normalizeYouTubeQuery(rawQuery);
+
+  if (!query) {
+    return res.status(400).json({ error: 'missing_query' });
+  }
+
+  if (!YOUTUBE_API_KEY) {
+    return res.status(501).json({ error: 'youtube_api_key_missing' });
+  }
+
+  const cacheKey = youtubeSearchCacheKey(query);
+  const cached = await safeReadCachedResponse(
+    YOUTUBE_SEARCH_CACHE_COLLECTION,
+    cacheKey,
+    YOUTUBE_SEARCH_CACHE_TTL_MS
+  );
+  if (sendCachedResponse(res, cached)) {
+    return;
+  }
+
+  const params = new URLSearchParams({
+    key: YOUTUBE_API_KEY,
+    part: 'snippet',
+    type: 'video',
+    maxResults: '1',
+    videoEmbeddable: 'true',
+    videoSyndicated: 'true',
+    safeSearch: 'moderate',
+    q: query
+  });
+
+  const url = `${YOUTUBE_SEARCH_BASE_URL}?${params.toString()}`;
+
+  let response;
+  let text;
+
+  try {
+    response = await fetch(url);
+    text = await response.text();
+  } catch (err) {
+    console.error('YouTube search request failed', { query, err });
+    return res.status(502).json({ error: 'youtube_search_failed' });
+  }
+
+  if (!response.ok) {
+    console.error(
+      'YouTube search responded with error',
+      response.status,
+      text ? text.slice(0, 200) : ''
+    );
+    return res.status(response.status).json({ error: 'youtube_search_error' });
+  }
+
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (err) {
+    console.error('Failed to parse YouTube search response as JSON', err);
+    return res.status(502).json({ error: 'youtube_response_invalid' });
+  }
+
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const bestItem = items.find(item => item?.id?.videoId);
+
+  const snippet = bestItem?.snippet && typeof bestItem.snippet === 'object' ? bestItem.snippet : {};
+  const videoId = typeof bestItem?.id?.videoId === 'string' ? bestItem.id.videoId.trim() : '';
+
+  const payload = {
+    query,
+    video: videoId
+      ? {
+          id: videoId,
+          title: typeof snippet.title === 'string' ? snippet.title : '',
+          description: typeof snippet.description === 'string' ? snippet.description : '',
+          channel: {
+            id: typeof snippet.channelId === 'string' ? snippet.channelId : '',
+            title: typeof snippet.channelTitle === 'string' ? snippet.channelTitle : ''
+          },
+          publishedAt: typeof snippet.publishedAt === 'string' ? snippet.publishedAt : '',
+          thumbnails: normalizeYouTubeThumbnails(snippet.thumbnails),
+          url: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+          embedUrl: `https://www.youtube.com/embed/${encodeURIComponent(videoId)}`
+        }
+      : null
+  };
+
+  const body = JSON.stringify(payload);
+
+  await safeWriteCachedResponse(YOUTUBE_SEARCH_CACHE_COLLECTION, cacheKey, {
+    status: 200,
+    contentType: 'application/json',
+    body,
+    metadata: { query, fetchedAt: new Date().toISOString() }
+  });
+
+  res.set('Cache-Control', 'public, max-age=1800');
+  res.type('application/json').send(body);
+});
+
 // --- GeoLayers game endpoints ---
 const layerOrder = ['rivers','lakes','elevation','roads','outline','cities','label'];
 const countriesPath = path.join(__dirname, '../geolayers-game/public/countries.json');

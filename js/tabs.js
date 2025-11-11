@@ -1,41 +1,9 @@
-import { currentUser } from './auth.js';
 import { loadTabOrder } from './settings.js';
 
-const RESTAURANTS_READY_EVENT = 'restaurantsPanelReady';
-let restaurantsInitPromise = null;
-
-function ensureRestaurantsPanelInitialized() {
-  if (typeof window.initRestaurantsPanel === 'function') {
-    return window.initRestaurantsPanel();
-  }
-
-  if (!restaurantsInitPromise) {
-    restaurantsInitPromise = new Promise(resolve => {
-      const handler = () => {
-        if (typeof window.initRestaurantsPanel === 'function') {
-          window.removeEventListener(RESTAURANTS_READY_EVENT, handler);
-          resolve(window.initRestaurantsPanel());
-        }
-      };
-      window.addEventListener(RESTAURANTS_READY_EVENT, handler, { once: true });
-    });
-  }
-
-  return restaurantsInitPromise;
-}
-
-export const PANELS = [
-  'moviesPanel',
-  'tvPanel',
-  'showsPanel',
-  'restaurantsPanel'
-];
+export const PANELS = ['tvPanel'];
 
 export const PANEL_NAMES = {
-  moviesPanel: 'Movies',
-  tvPanel: 'TV Shows',
-  showsPanel: 'Live Music',
-  restaurantsPanel: 'Restaurants'
+  tvPanel: 'TV Shows'
 };
 
 let tabsInitialized = false;
@@ -88,17 +56,8 @@ export async function initTabs(user, db) {
       history.pushState(null, '', `#${target}`);
 
       // 4) init dynamic content
-      if (target === 'moviesPanel') {
-        await window.initMoviesPanel();
-      }
-      else if (target === 'tvPanel') {
+      if (target === 'tvPanel') {
         await window.initTvPanel();
-      }
-      else if (target === 'showsPanel') {
-        await window.initShowsPanel();
-      }
-      else if (target === 'restaurantsPanel') {
-        await ensureRestaurantsPanelInitialized();
       }
     });
   });
@@ -125,17 +84,8 @@ export async function initTabs(user, db) {
   // on load, fire any needed init. If DOMContentLoaded already fired,
   // run immediately instead of waiting for the event.
   const runInitial = () => {
-    if (initial === 'moviesPanel') {
-      window.initMoviesPanel();
-    }
-    else if (initial === 'tvPanel') {
+    if (initial === 'tvPanel') {
       window.initTvPanel();
-    }
-    else if (initial === 'showsPanel') {
-      window.initShowsPanel();
-    }
-    else if (initial === 'restaurantsPanel') {
-      ensureRestaurantsPanelInitialized();
     }
   };
 
