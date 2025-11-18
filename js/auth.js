@@ -11,17 +11,25 @@ import { clearDecisionsCache, clearGoalOrderCache } from './cache.js';
 
 export let currentUser = null;
 
-const firebaseConfig = {
-  apiKey: "AIzaSyBbet_bmwm8h8G5CqvmzrdAnc3AO-0IKa8",
-  authDomain: "decision-maker-4e1d3.firebaseapp.com",
-  projectId: "decision-maker-4e1d3",
-  storageBucket: "decision-maker-4e1d3.firebasestorage.app",
-  messagingSenderId: "727689864651",
-  appId: "1:727689864651:web:0100c3894790b8c188c24e",
-  measurementId: "G-7EJVQN0WT3"
-};
+function getRuntimeFirebaseConfig() {
+  const scope =
+    typeof window !== 'undefined'
+      ? window
+      : typeof globalThis !== 'undefined'
+        ? globalThis
+        : null;
+  if (!scope) return null;
+  if (scope.tvlistFirebaseConfig && typeof scope.tvlistFirebaseConfig === 'object') {
+    return scope.tvlistFirebaseConfig;
+  }
+  if (scope.__TVLIST_FIREBASE_CONFIG__ && typeof scope.__TVLIST_FIREBASE_CONFIG__ === 'object') {
+    return scope.__TVLIST_FIREBASE_CONFIG__;
+  }
+  return null;
+}
 
-firebase.initializeApp(firebaseConfig);
+const firebaseConfig = getRuntimeFirebaseConfig();
+firebase.initializeApp(firebaseConfig || {});
 export const auth = firebase.auth();
 auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(err => {
   console.error('Failed to set auth persistence:', err);
@@ -123,4 +131,3 @@ export function initAuth({ loginBtn, logoutBtn, userEmail, bottomLoginBtn, botto
     onLogin(user);
   });
 }
-

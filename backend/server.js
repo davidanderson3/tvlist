@@ -156,6 +156,29 @@ function resolveTmdbProxyUpstreamUrl() {
   return DEFAULT_REMOTE_TMDB_PROXY_URL;
 }
 
+const FIREBASE_CONFIG_ENV_MAP = {
+  apiKey: 'FIREBASE_API_KEY',
+  authDomain: 'FIREBASE_AUTH_DOMAIN',
+  projectId: 'FIREBASE_PROJECT_ID',
+  storageBucket: 'FIREBASE_STORAGE_BUCKET',
+  messagingSenderId: 'FIREBASE_MESSAGING_SENDER_ID',
+  appId: 'FIREBASE_APP_ID',
+  measurementId: 'FIREBASE_MEASUREMENT_ID'
+};
+
+function readFirebaseConfigFromEnv() {
+  const config = {};
+  let hasValue = false;
+  for (const [prop, envKey] of Object.entries(FIREBASE_CONFIG_ENV_MAP)) {
+    const value = process.env[envKey];
+    if (value) {
+      config[prop] = value;
+      hasValue = true;
+    }
+  }
+  return hasValue ? config : null;
+}
+
 const TMDB_ALLOWED_ENDPOINTS = {
   discover: { path: '/3/discover/movie' },
   discover_tv: { path: '/3/discover/tv' },
@@ -956,6 +979,16 @@ const plaidClient = (() => {
   });
   return new PlaidApi(config);
 })();
+
+app.get('/firebase-config.js', (req, res) => {
+  const config = readFirebaseConfigFromEnv();
+  if (!config) {
+    return res.status(204).type('application/javascript').send('');
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.type('application/javascript');
+  res.send(`window.tvlistFirebaseConfig = ${JSON.stringify(config)};`);
+});
 
 // Serve static files (like index.html, style.css, script.js)
 // Allow API routes (like /api/eventbrite) to continue past the static middleware

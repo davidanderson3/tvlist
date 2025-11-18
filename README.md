@@ -100,9 +100,14 @@ Remember to also configure Firebase (see `firebase.json` and `.firebaserc`) if y
    ```bash
    npm start
    ```
-   This launches the Express server on `http://localhost:3003` and serves `index.html` plus the API proxies.
+   `npm start` now runs `scripts/start-server.sh`, which hydrates `YOUTUBE_API_KEY` plus the required `FIREBASE_*` config entries from Google Cloud Secret Manager (if they're not already set in your shell) and then launches the Express server on `http://localhost:3004`. The script keeps the rest of the proxies and static assets available as before.
 3. **Set up API keys** – Supply environment variables for any services you plan to use (e.g., TMDB, Ticketmaster, Foursquare).
 4. **Optional Firebase emulators** – If you prefer not to use the production Firestore project during development, configure the Firebase emulator suite and point the app to it.
+
+## Firebase Hosting
+
+- The repo is already wired to Firebase project `decision-maker-4e1d3` via `.firebaserc`. Once you have authenticated with `firebase login`, run `firebase deploy --only hosting` (add `,functions` when you want to push the Node APIs as well) to publish the front end from this repo.
+- After deployment the site is accessible at `https://decision-maker-4e1d3.web.app` (and `https://decision-maker-4e1d3.firebaseapp.com`). I cannot deploy from this sandbox without project credentials, but those commands will publish the app and give you the URL you requested.
 
 ## Testing
 - **Unit/integration tests** – run `npm test` to execute the Vitest suite (covers movie discovery, Ticketmaster lookups, etc.).
